@@ -1,0 +1,160 @@
+---
+title: "Data Visualization"
+format: html
+---
+
+```{r include=FALSE}
+library(tidyverse)
+```
+
+Purpose: visualize long-term population estimate, redd count, and spawning weir data from multiple YCT populations in the upper Snake River watershed. 
+
+## Data
+```{r}
+# mark-recapture population estimates
+popest <- read_csv("C:/Users/jbaldock/OneDrive - DOI/Documents/WyACT/Snake River Assessment/Population data/PopulationEstimates_WGFD_1988-2022_cleaned.csv") %>%
+  mutate(Nperkm_total = Npermile_total/1.60934)
+
+# spring creek redd counts
+reddcts <- read_csv("C:/Users/jbaldock/OneDrive - DOI/Documents/WyACT/Snake River Assessment/Population data/ReddCounts_WGFD_1971-2021_cleaned.csv")
+
+# lower bar bc weir (latent run size following run timing model)
+weir <- read_csv("C:/Users/jbaldock/OneDrive - DOI/Documents/WyACT/Snake River Assessment/Population data/RunTiming_TopModel_MalFem2_ParameterSummary.csv")
+names(weir) <- c("param", "mean", "sd", "ci025", "ci_250", "ci_500", "ci_750", "ci_975", "Rhat", "n.eff")
+weirtib <- tibble(year = rep(NA, times = 55),
+                  param = rep(NA, times = 55),
+                  total_mean = rep(NA, times = 55),
+                  total_sd = rep(NA, times = 55))
+weirtib$year <- c(1965:1990, 1992:2015, 2017:2021)
+for (i in 1:55) {
+  weirtib$param[i] <- unlist(weir[i+174,1]) # parameter name
+  weirtib$total_mean[i] <- unlist(weir[i+174,2]) # mean total run size
+  weirtib$total_sd[i] <- unlist(weir[i+174,3]) # SD total run size
+}
+```
+
+
+## Mark-Recapture
+
+View all data:
+```{r}
+popest %>% 
+  ggplot(aes(x = year, y = Nperkm_total)) +
+  geom_point() + #geom_line() +
+  facet_wrap(~site)
+```
+
+Restrict to sites with >10 years of data:
+```{r fig.width=7, fig.height=6}
+popest %>% 
+  filter(site %in% c("Flat_NowlinSleigh", "GrosVentre_ParkBoundary-Kelly", "Hoback_LowerHoback", "Salt_Narrows-Hwy238", "Salt_AuburnGrover-Christiansen", "Salt_Etna", "Snake_Wilson-SouthPark", "Snake_Moose-Wilson", "Snake_Deadmans-Moose")) %>%
+  mutate(site = recode(site, 
+                       "Snake_Deadmans-Moose" = "Snake River: Deadmans-Moose", 
+                       "Snake_Moose-Wilson" = "Snake River: Moose-Wilson", 
+                       "Snake_Wilson-SouthPark" = "Snake River: Wilson-South Park", 
+                       "GrosVentre_ParkBoundary-Kelly" = "Gros Ventre River", 
+                       "Flat_NowlinSleigh" = "Flat Creek", 
+                       "Hoback_LowerHoback" = "Hoback River (lower)",  
+                       "Salt_AuburnGrover-Christiansen" = "Salt River: Auburn-Christiansen", 
+                       "Salt_Narrows-Hwy238" = "Salt River: The Narrows", 
+                       "Salt_Etna" = "Salt River: Etna")) %>%
+  mutate(site = factor(site, levels = c("Snake River: Deadmans-Moose", "Snake River: Moose-Wilson", "Snake River: Wilson-South Park", 
+                                        "Gros Ventre River", "Flat Creek", "Hoback River (lower)",  
+                                        "Salt River: Auburn-Christiansen", "Salt River: The Narrows", "Salt River: Etna"))) %>%
+  ggplot(aes(x = year, y = Nperkm_total)) +
+  #geom_smooth() +
+  geom_point() +
+  facet_wrap(~site, ncol = 3) + 
+  xlab("Year") + ylab("YCT per km") + #ylim(0,900) +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"))
+```
+
+Add LOESS smoothers and plot on unique scales:
+```{r fig.width=7, fig.height=6}
+popest %>% 
+  filter(site %in% c("Flat_NowlinSleigh", "GrosVentre_ParkBoundary-Kelly", "Hoback_LowerHoback", "Salt_Narrows-Hwy238", "Salt_AuburnGrover-Christiansen", "Salt_Etna", "Snake_Wilson-SouthPark", "Snake_Moose-Wilson", "Snake_Deadmans-Moose")) %>%
+  mutate(site = recode(site, 
+                       "Snake_Deadmans-Moose" = "Snake River: Deadmans-Moose", 
+                       "Snake_Moose-Wilson" = "Snake River: Moose-Wilson", 
+                       "Snake_Wilson-SouthPark" = "Snake River: Wilson-South Park", 
+                       "GrosVentre_ParkBoundary-Kelly" = "Gros Ventre River", 
+                       "Flat_NowlinSleigh" = "Flat Creek", 
+                       "Hoback_LowerHoback" = "Hoback River (lower)",  
+                       "Salt_AuburnGrover-Christiansen" = "Salt River: Auburn-Christiansen", 
+                       "Salt_Narrows-Hwy238" = "Salt River: The Narrows", 
+                       "Salt_Etna" = "Salt River: Etna")) %>%
+  mutate(site = factor(site, levels = c("Snake River: Deadmans-Moose", "Snake River: Moose-Wilson", "Snake River: Wilson-South Park", 
+                                        "Gros Ventre River", "Flat Creek", "Hoback River (lower)",  
+                                        "Salt River: Auburn-Christiansen", "Salt River: The Narrows", "Salt River: Etna"))) %>%
+  ggplot(aes(x = year, y = Nperkm_total)) +
+  geom_smooth() +
+  geom_point() +
+  facet_wrap(~site, ncol = 3, scales = "free_y") + 
+  xlab("Year") + ylab("YCT per km") + #ylim(0,900) +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"))
+```
+
+
+## Redd Counts
+
+View all data
+```{r}
+reddcts %>%
+  ggplot(aes(x = year, y = reddsperkm)) +
+  geom_point() +
+  facet_wrap(~stream) 
+```
+
+Drop Cody Creek (only 4 years or data) and fix names
+```{r fig.width=8, fig.height=7}
+reddcts %>%
+  filter(stream != "Cody") %>%
+  mutate(stream = recode(stream, "3 Channel" = "Three Channel", "Snake River Side Channel" = "SR Side Channel")) %>%
+  mutate(stream = factor(stream, levels = c("Cowboy Cabin", "Upper Bar BC", "SR Side Channel", "Blacktail",
+                                            "Three Channel", "Price", "Lower Bar BC", "Little Bar BC", "Fish", 
+                                            "Flat", "Nowlin", "Spring", "Blue Crane", "Dave", "Laker", "Christiansen"))) %>%
+  ggplot(aes(x = year, y = reddsperkm)) +
+  #geom_smooth() +
+  geom_point() +
+  facet_wrap(~stream) + 
+  xlab("Year") + ylab("Redds per km") + #ylim(0,900) +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"))
+```
+
+Add LOESS smoothers and plot on unique scales:
+```{r fig.width=8, fig.height=7}
+reddcts %>%
+  filter(stream != "Cody") %>%
+  mutate(stream = recode(stream, "3 Channel" = "Three Channel", "Snake River Side Channel" = "SR Side Channel")) %>%
+  mutate(stream = factor(stream, levels = c("Cowboy Cabin", "Upper Bar BC", "SR Side Channel", "Blacktail",
+                                            "Three Channel", "Price", "Lower Bar BC", "Little Bar BC", "Fish", 
+                                            "Flat", "Nowlin", "Spring", "Blue Crane", "Dave", "Laker", "Christiansen"))) %>%
+  ggplot(aes(x = year, y = reddsperkm)) +
+  geom_smooth() +
+  geom_point() +
+  facet_wrap(~stream, scales = "free_y") + 
+  xlab("Year") + ylab("Redds per km") + #ylim(0,900) +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"))
+```
+
+
+## Weir
+
+Plot time series of YCT spawning abundance in Lower Bar BC (enumerated at the WGFD weir). Abundance data are corrected for interannual variation in monitoring period using a run timing model as in Baldock *et al.* (2023, CJFAS).
+```{r}
+weirtib %>%
+  ggplot(aes(x = year, y = total_mean)) +
+  geom_point() + geom_line() +
+  xlab("Year") + ylab("YCT spawning abundance") + ylim(0,max(weirtib$total_mean)) +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"))
+```
+
+Add LOESS smoother:
+```{r}
+weirtib %>%
+  ggplot(aes(x = year, y = total_mean)) +
+  geom_smooth() +
+  geom_point() + geom_line() +
+  xlab("Year") + ylab("YCT spawning abundance") + ylim(0,max(weirtib$total_mean)) +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"))
+```
