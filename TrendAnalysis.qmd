@@ -1,0 +1,451 @@
+---
+title: "Trend Analysis"
+format: html
+---
+
+
+```{r include=FALSE}
+library(tidyverse)
+library(MARSS)
+library(egg)
+```
+
+Purpose: use linear regression and Dynamic Factor Analysis (Zuur *et al.*, Ohlberger et al. *2016*) to characterize long-term trends in YCT population estimates and redd counts. 
+
+
+## Mark-Recapture
+
+Format MR data
+```{r}
+popest <- read_csv("C:/Users/jbaldock/OneDrive - DOI/Documents/WyACT/Snake River Assessment/Population data/PopulationEstimates_WGFD_1988-2022_cleaned.csv") %>%
+  mutate(Nperkm_total = Npermile_total/1.60934) %>% 
+  filter(site %in% c("Flat_NowlinSleigh", "GrosVentre_ParkBoundary-Kelly", "Hoback_LowerHoback", "Salt_Narrows-Hwy238", "Salt_AuburnGrover-Christiansen", "Salt_Etna", "Snake_Wilson-SouthPark", "Snake_Moose-Wilson", "Snake_Deadmans-Moose")) %>%
+  mutate(site = recode(site, 
+                       "Snake_Deadmans-Moose" = "Snake River: Deadmans-Moose", 
+                       "Snake_Moose-Wilson" = "Snake River: Moose-Wilson", 
+                       "Snake_Wilson-SouthPark" = "Snake River: Wilson-South Park", 
+                       "GrosVentre_ParkBoundary-Kelly" = "Gros Ventre River", 
+                       "Flat_NowlinSleigh" = "Flat Creek", 
+                       "Hoback_LowerHoback" = "Hoback River (lower)",  
+                       "Salt_AuburnGrover-Christiansen" = "Salt River: Auburn-Christiansen", 
+                       "Salt_Narrows-Hwy238" = "Salt River: The Narrows", 
+                       "Salt_Etna" = "Salt River: Etna")) %>%
+  mutate(site = factor(site, levels = c("Snake River: Deadmans-Moose", "Snake River: Moose-Wilson", "Snake River: Wilson-South Park", 
+                                        "Gros Ventre River", "Flat Creek", "Hoback River (lower)",  
+                                        "Salt River: Auburn-Christiansen", "Salt River: The Narrows", "Salt River: Etna")))
+
+popest_mat <- popest %>% select(year, site, Nperkm_total) %>% spread(key = site, value = Nperkm_total)
+popest_mat_formatted <- t(scale(popest_mat[,c(2:10)]))
+```
+
+
+### Linear trends
+
+Simple trends using linear regression
+```{r fig.width=8, fig.height=7}
+popest %>% 
+  group_by(site) %>%
+  mutate(pescaled = scale(Nperkm_total)) %>%
+  ungroup() %>%
+  ggplot(aes(x = year, y = pescaled)) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue", fill = "blue", alpha = 0.2) +
+  geom_point() +
+  facet_wrap(~site) +
+  xlab("Year") +
+  ylab("YCT per km (standardized)") +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+
+### Dynamic Factor Analysis
+
+Use dynamic factor analysis, DFA, to extract common trends from the population estimate data and estimate the loading of each population onto each  trend (Zuur *et al.* 2003, Ohlberger *et al.* 2016).
+
+Fit MARSS models with 1-3 underlying trends and equal variance-covariance structure (these models tended to have the greatest support when compared against other var./cov. structures using AIC). Note that models with 4+ trends fail to converge/throw errors. 
+```{r}
+cntl.list = list(minit = 200, maxit = 5000, allow.degen = FALSE)
+fit_1 <- MARSS(popest_mat_formatted, model = list(m = 1, R = "equalvarcov"), form = "dfa", silent = TRUE, control = cntl.list)
+fit_2 <- MARSS(popest_mat_formatted, model = list(m = 2, R = "equalvarcov"), form = "dfa", silent = TRUE, control = cntl.list)
+fit_3 <- MARSS(popest_mat_formatted, model = list(m = 3, R = "equalvarcov"), form = "dfa", silent = TRUE, control = cntl.list)
+```
+
+Fit MARSS models with 1-4 underlying trends and differnt variance/covariance structures, then compare using AICc. Note that using "unconstrained" model structure leads to errors. 
+```{r, eval=FALSE, include=FALSE}
+levels.R <- c("diagonal and equal", "diagonal and unequal", "equalvarcov")
+model.data <- data.frame(stringsAsFactors = FALSE)
+
+for (R in levels.R) 
+  for (m in 1:4) {
+    dfa.model <- list(A = "zero", R = R, m = m)
+    kemz <- MARSS(reddcts_mat_formatted, model = dfa.model, form = "dfa", silent = TRUE)
+    model.data <- rbind(
+      model.data,
+      data.frame(R = R,
+                 m = m,
+                 logLik = kemz$logLik,
+                 K = kemz$num.params,
+                 AICc = kemz$AICc,
+                 stringsAsFactors = FALSE
+                 )
+      )
+    assign(paste("kemz", m, R, sep = "."), kemz)
+    print(m)
+    } # end m loop
+print(R)
+} # end R loop
+
+model.data %>% mutate(delta.AICc = round(AICc - min(AICc), digits = 2)) %>% arrange(delta.AICc)
+```
+
+Use model selection to determine number of underlying trends: 1-trend model is best.
+```{r}
+tibble(
+  model = c("1 trend", "2 trends", "3 trends"),
+  AICc = round(c(fit_1$AICc, fit_2$AICc, fit_3$AICc), digits = 2)
+) %>% mutate(delta.AICc = round(AICc - min(AICc), digits = 2)) %>% arrange(delta.AICc)
+```
+
+Set top model
+```{r}
+topmod <- fit_1
+```
+
+View diagnostic plots
+```{r include = FALSE}
+plot(topmod)
+```
+
+Use varimax rotation to determine trends and loadings
+```{r }
+# get the inverse of the rotation matrix
+Z.est <- coef(topmod, type = "matrix")$Z
+H.inv <- 1
+if (ncol(Z.est) > 1)
+H.inv <- varimax(coef(topmod, type = "matrix")$Z)$rotmat
+
+# rotate factor loadings
+Z.rot <- Z.est %*% H.inv
+# rotate trends
+trends.rot <- solve(H.inv) %*% topmod$states
+trends.rot.low <- trends.rot - (solve(H.inv) %*% (topmod$states.se*1.95))
+trends.rot.up <- trends.rot + (solve(H.inv) %*% (topmod$states.se*1.95))
+
+# Add CIs to marssMLE object
+topmod <- MARSSparamCIs(topmod)
+# Use coef() to get the upper and lower CIs
+Z.low <- coef(topmod, type = "Z", what = "par.lowCI")
+Z.up <- coef(topmod, type = "Z", what = "par.upCI")
+Z.rot.up <- Z.up %*% H.inv
+Z.rot.low <- Z.low %*% H.inv
+df <- data.frame(est = as.vector(Z.rot),
+                 conf.up = as.vector(Z.rot.up),
+                 conf.low = as.vector(Z.rot.low)
+                 )
+```
+
+Plot (rotated) common trend and loadings. This figure shows the common trend (left panel) and population-specific trend loadings (right panel; i.e., the extent to which each time series maps onto the common trend). The common trend shows a general pattern of increasing population density, particularly since *ca.* 2006. This increase is largely driven by the Gros Ventre, Salt River Auburn-Christiansen, and Salt River Narrows populations. In contrast, the Snake River Deadmans-Moose population shows the opposite pattern: a long-term decline. All other populations map weakly onto the common trend (i.e., stable trend in population density). 
+```{r fig.width=8, fig.height=5}
+pops <- rownames(popest_mat_formatted)
+pops.short <- c("SNK1", "SNK2", "SNK3", "GRVE", "FLAT", "HOBK", "SLT1", "SLT2", "SLT3")
+
+# Plot common trends with confidence interval
+ptrend1 <- ggplot() + 
+  geom_ribbon(data = NULL, aes(x = popest_mat$year, ymin = trends.rot.low[1,], ymax = trends.rot.up[1,]), fill = "grey") +
+  geom_hline(yintercept = 0, size = 0.5, linetype = "dashed") +
+  geom_line(data = NULL, aes(x = popest_mat$year, y = trends.rot[1,]), size = 1) +
+  xlab("Year") +
+  ylab("Common trend") +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"))
+
+# Plot loadings
+pload1 <- ggplot(data=NULL, aes(factor(pops.short, levels = pops.short), Z.rot[,1])) + 
+  geom_hline(yintercept = 0, size = 0.5, color = "grey50") +
+  geom_hline(yintercept = 0.2, size = 0.5, linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = -0.2, size = 0.5, linetype = "dashed", color = "grey50") +
+  geom_bar(stat = "identity", width = 0.2, fill = "black") +
+  xlab("Population") +
+  ylab("Loading") +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# combine plots
+ggarrange(ptrend1, pload1, ncol = 2)
+```
+
+Plot population-specific trend estimates. These are basically the loadings multiplied by the common trend and show trend estimates for each population individually.
+```{r  fig.width=8, fig.height=7}
+# run kalman filter
+kf <- MARSSkfss(topmod)
+
+# extract model components
+Z_mat <- coef(topmod, type = "matrix")$Z  # Loadings (n_series x n_trends)
+xtT <- kf$xtT                               # States (n_trends x time)
+VtT <- kf$VtT                               # State covariance matrices (n_trends x n_trends x time)
+
+# compute fitted values and standard errors
+n_series <- nrow(Z_mat)
+n_time <- ncol(xtT)
+
+fitted_vals <- Z_mat %*% xtT              # n_series x time
+se_vals <- matrix(NA, n_series, n_time)   # standard errors
+
+for (t in 1:n_time) {
+  Vt <- VtT[, , t]
+  Var_yt <- Z_mat %*% Vt %*% t(Z_mat)
+  se_vals[, t] <- sqrt(diag(Var_yt))      # std dev for each series at time t
+}
+
+# construct 95% confidence intervals
+upper_band <- fitted_vals + 1.96 * se_vals
+lower_band <- fitted_vals - 1.96 * se_vals
+
+# plot
+as_tibble(t(fitted_vals)) %>% 
+  mutate(year = popest_mat$year) %>% 
+  gather(key = "stream", value = "fitted", -year) %>% 
+  mutate(stream = factor(stream, levels = pops)) %>%
+  left_join(as_tibble(t(upper_band)) %>% 
+              mutate(year = popest_mat$year) %>% 
+              gather(key = "stream", value = "fitted_up", -year) %>% 
+              mutate(stream = factor(stream, levels = pops))) %>%
+  left_join(as_tibble(t(lower_band)) %>% 
+              mutate(year = popest_mat$year) %>% 
+              gather(key = "stream", value = "fitted_low", -year) %>% 
+              mutate(stream = factor(stream, levels = pops))) %>%
+  left_join(as_tibble(t(popest_mat_formatted)) %>% 
+              mutate(year = popest_mat$year) %>% 
+              gather(key = "stream", value = "observed", -year) %>% 
+              mutate(stream = factor(stream, levels = pops))) %>%
+  ggplot() +
+  geom_ribbon(aes(x = year, ymin = fitted_low, ymax = fitted_up), fill = "blue", alpha = 0.2) +
+  geom_point(aes(x = year, y = observed)) +
+  geom_line(aes(x = year, y = fitted), color = "blue", size = 1) +
+  facet_wrap(~stream) +
+  xlab("Year") +
+  ylab("Redds per km (standardized)") +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+
+## Redd Counts
+
+Format redd count data
+```{r}
+# spring creek redd counts
+reddcts <- read_csv("C:/Users/jbaldock/OneDrive - DOI/Documents/WyACT/Snake River Assessment/Population data/ReddCounts_WGFD_1971-2021_cleaned.csv") %>%
+  filter(stream != "Cody") %>%
+  mutate(stream = recode(stream, "3 Channel" = "Three Channel", "Snake River Side Channel" = "SR Side Channel")) %>%
+  mutate(stream = factor(stream, levels = c("Cowboy Cabin", "Upper Bar BC", "SR Side Channel", "Blacktail",
+                                            "Three Channel", "Price", "Lower Bar BC", "Little Bar BC", "Fish", 
+                                            "Flat", "Nowlin", "Spring", "Blue Crane", "Dave", "Laker", "Christiansen")))
+
+reddcts_mat <- reddcts %>% select(year, stream, reddsperkm) %>% spread(key = stream, value = reddsperkm)
+reddcts_mat_formatted <- t(scale(reddcts_mat[,c(2:17)]))
+```
+
+### Linear trends
+
+Simple trends using linear regression
+```{r fig.width=8, fig.height=7}
+reddcts %>% 
+  group_by(stream) %>%
+  mutate(reddsscaled = scale(reddsperkm)) %>%
+  ungroup() %>%
+  ggplot(aes(x = year, y = reddsscaled)) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue", fill = "blue", alpha = 0.2) +
+  geom_point() +
+  facet_wrap(~stream) +
+  xlab("Year") +
+  ylab("Redds per km (standardized)") +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+
+### Dynamic Factor Analysis
+
+Use dynamic factor analysis, DFA, to extract common trends from the redd count data and estimate the loading of each population onto each  trend (Zuur *et al.* 2003, Ohlberger *et al.* 2016).
+
+Fit MARSS models with 1-4 underlying trends and equal variance-covariance structure (these models tended to have the greatest support when compared against other var./cov. structures using AIC).
+```{r}
+cntl.list = list(minit = 200, maxit = 5000, allow.degen = FALSE)
+fit_1 <- MARSS(reddcts_mat_formatted, model = list(m = 1, R = "equalvarcov"), form = "dfa", silent = TRUE, control = cntl.list)
+fit_2 <- MARSS(reddcts_mat_formatted, model = list(m = 2, R = "equalvarcov"), form = "dfa", silent = TRUE, control = cntl.list)
+fit_3 <- MARSS(reddcts_mat_formatted, model = list(m = 3, R = "equalvarcov"), form = "dfa", silent = TRUE, control = cntl.list)
+fit_4 <- MARSS(reddcts_mat_formatted, model = list(m = 4, R = "equalvarcov"), form = "dfa", silent = TRUE, control = cntl.list)
+```
+
+Fit MARSS models with 1-4 underlying trends and differnt variance/covariance structures, then compare using AICc. Note that using and "unconstrained" model structure leads to errors. 
+```{r, eval=FALSE, include=FALSE}
+levels.R <- c("diagonal and equal", "diagonal and unequal", "equalvarcov")
+model.data <- data.frame(stringsAsFactors = FALSE)
+
+for (R in levels.R) 
+  for (m in 1:4) {
+    dfa.model <- list(A = "zero", R = R, m = m)
+    kemz <- MARSS(reddcts_mat_formatted, model = dfa.model, form = "dfa", silent = TRUE)
+    model.data <- rbind(
+      model.data,
+      data.frame(R = R,
+                 m = m,
+                 logLik = kemz$logLik,
+                 K = kemz$num.params,
+                 AICc = kemz$AICc,
+                 stringsAsFactors = FALSE
+                 )
+      )
+    assign(paste("kemz", m, R, sep = "."), kemz)
+    print(m)
+    } # end m loop
+print(R)
+} # end R loop
+
+model.data %>% mutate(delta.AICc = round(AICc - min(AICc), digits = 2)) %>% arrange(delta.AICc)
+```
+
+Use model selection to determine number of underlying trends: 1-trend model is best, but only slightly better than the 2 trend model.
+```{r}
+tibble(
+  model = c("1 trend", "2 trends", "3 trends", "4 trends"),
+  AICc = round(c(fit_1$AICc, fit_2$AICc, fit_3$AICc, fit_4$AICc), digits = 2)
+) %>% mutate(delta.AICc = round(AICc - min(AICc), digits = 2)) %>% arrange(delta.AICc)
+```
+
+Set top model
+```{r}
+topmod <- fit_1
+```
+
+View diagnostic plots
+```{r include=FALSE}
+plot(topmod)
+```
+
+Use varimax rotation to determine trends and loadings
+```{r }
+# get the inverse of the rotation matrix
+Z.est <- coef(topmod, type = "matrix")$Z
+H.inv <- 1
+if (ncol(Z.est) > 1)
+H.inv <- varimax(coef(topmod, type = "matrix")$Z)$rotmat
+
+# rotate factor loadings
+Z.rot <- Z.est %*% H.inv
+# rotate trends
+trends.rot <- solve(H.inv) %*% topmod$states
+trends.rot.low <- trends.rot - (solve(H.inv) %*% (topmod$states.se*1.95))
+trends.rot.up <- trends.rot + (solve(H.inv) %*% (topmod$states.se*1.95))
+
+# Add CIs to marssMLE object
+topmod <- MARSSparamCIs(topmod)
+# Use coef() to get the upper and lower CIs
+Z.low <- coef(topmod, type = "Z", what = "par.lowCI")
+Z.up <- coef(topmod, type = "Z", what = "par.upCI")
+Z.rot.up <- Z.up %*% H.inv
+Z.rot.low <- Z.low %*% H.inv
+df <- data.frame(est = as.vector(Z.rot),
+                 conf.up = as.vector(Z.rot.up),
+                 conf.low = as.vector(Z.rot.low)
+                 )
+```
+
+Plot (rotated) common trend and loadings. The common trend indicates a period of relative stability (pre-1993) followed a period of increasing redd densities in spring-fed spawning tributaries (1993-2022). This post-1993 period of population increases is interrupted by a short period (*ca.* 5 years) of decline in the early 2000s. Most populations load positively onto the common trend, but particularly Cowboy Cabin Spring, Upper Bar BC Spring, Price Spring, Flat Creek, Nowlin Creek, and Christiansen Spring. Spring Creek shows the opposite trend, indicating a decline in redd densities since the 1990s (although note that data for this population is only available from 1993 to 2007). Redd densities in all other populations are generally stable over the period of record. 
+```{r fig.width=8, fig.height=5}
+pops <- rownames(reddcts_mat_formatted)
+pops.short <- c("COCA", "UBBC", "SRSC", "BLKT", "THCH", "PRCE", "LOBC", "LIBC", "FISH", "FLAT", "NOWL", "SPRG", "BLCR", "DAVE", "LAKR", "CHRS")
+
+# Plot common trends with confidence interval
+ptrend1 <- ggplot() + 
+  geom_ribbon(data = NULL, aes(x = reddcts_mat$year, ymin = trends.rot.low[1,], ymax = trends.rot.up[1,]), fill = "grey") +
+  geom_hline(yintercept = 0, size = 0.5, linetype = "dashed") +
+  geom_line(data = NULL, aes(x = reddcts_mat$year, y = trends.rot[1,]), size = 1) +
+  xlab("Year") +
+  ylab("Common trend") +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"))
+# ptrend2 <- ggplot() + 
+#   geom_ribbon(data = NULL, aes(x = reddcts_mat$year, ymin = trends.rot.low[2,], ymax = trends.rot.up[2,]), fill = "grey") +
+#   geom_hline(yintercept = 0, size = 0.5, linetype = "dashed") +
+#   geom_line(data = NULL, aes(x = reddcts_mat$year, y = trends.rot[2,]), size = 1) +
+#   xlab("Year") +
+#   ylab("Common trend 2") +
+#   theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black")) + ylim(-6,9)
+
+# Plot loadings
+pload1 <- ggplot(data=NULL, aes(factor(pops.short, levels = pops.short), Z.rot[,1])) + 
+  geom_hline(yintercept = 0, size = 0.5, color = "grey50") +
+  geom_hline(yintercept = 0.2, size = 0.5, linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = -0.2, size = 0.5, linetype = "dashed", color = "grey50") +
+  geom_bar(stat = "identity", width = 0.2, fill = "black") +
+  xlab("Population") +
+  ylab("Loading") +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+# pload2 <- ggplot(data=NULL, aes(factor(pops.short, levels = pops.short), Z.rot[,2])) + 
+#   geom_hline(yintercept = 0, size = 0.5, color = "grey50") +
+#   geom_hline(yintercept = 0.2, size = 0.5, linetype = "dashed", color = "grey50") +
+#   geom_hline(yintercept = -0.2, size = 0.5, linetype = "dashed", color = "grey50") +
+#   geom_bar(stat = "identity", width = 0.2, fill = "black") +
+#   xlab("Population") +
+#   ylab("Loading") +
+#   theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylim(-0.3,0.4)
+
+# combine plots
+ggarrange(ptrend1, pload1, ncol = 2)
+```
+
+Plot population-specific trend estimates
+```{r  fig.width=8, fig.height=7}
+# run kalman filter
+kf <- MARSSkfss(topmod)
+
+# extract model components
+Z_mat <- coef(topmod, type = "matrix")$Z  # Loadings (n_series x n_trends)
+xtT <- kf$xtT                               # States (n_trends x time)
+VtT <- kf$VtT                               # State covariance matrices (n_trends x n_trends x time)
+
+# compute fitted values and standard errors
+n_series <- nrow(Z_mat)
+n_time <- ncol(xtT)
+
+fitted_vals <- Z_mat %*% xtT              # n_series x time
+se_vals <- matrix(NA, n_series, n_time)   # standard errors
+
+for (t in 1:n_time) {
+  Vt <- VtT[, , t]
+  Var_yt <- Z_mat %*% Vt %*% t(Z_mat)
+  se_vals[, t] <- sqrt(diag(Var_yt))      # std dev for each series at time t
+}
+
+# construct 95% confidence intervals
+upper_band <- fitted_vals + 1.96 * se_vals
+lower_band <- fitted_vals - 1.96 * se_vals
+
+# plot
+as_tibble(t(fitted_vals)) %>% 
+  mutate(year = reddcts_mat$year) %>% 
+  gather(key = "stream", value = "fitted", -year) %>% 
+  mutate(stream = factor(stream, levels = pops)) %>%
+  left_join(as_tibble(t(upper_band)) %>% 
+              mutate(year = reddcts_mat$year) %>% 
+              gather(key = "stream", value = "fitted_up", -year) %>% 
+              mutate(stream = factor(stream, levels = pops))) %>%
+  left_join(as_tibble(t(lower_band)) %>% 
+              mutate(year = reddcts_mat$year) %>% 
+              gather(key = "stream", value = "fitted_low", -year) %>% 
+              mutate(stream = factor(stream, levels = pops))) %>%
+  left_join(as_tibble(t(reddcts_mat_formatted)) %>% 
+              mutate(year = reddcts_mat$year) %>% 
+              gather(key = "stream", value = "observed", -year) %>% 
+              mutate(stream = factor(stream, levels = pops))) %>%
+  ggplot() +
+  geom_ribbon(aes(x = year, ymin = fitted_low, ymax = fitted_up), fill = "blue", alpha = 0.2) +
+  geom_point(aes(x = year, y = observed)) +
+  geom_line(aes(x = year, y = fitted), color = "blue", size = 1) +
+  facet_wrap(~stream) +
+  xlab("Year") +
+  ylab("Redds per km (standardized)") +
+  theme_bw() + theme(panel.grid = element_blank(), axis.text = element_text(color = "black"), axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+
+
+
+
+
